@@ -5,5 +5,4 @@ This repository contains code to simulate the real-time dynamics of a fly, or ot
 
 The simulation is based off of the dynamical model presented in: https://ieeexplore.ieee.org/document/9683219/
 
-![img.png](img/fly_coordinate_system.png)
-
+![img_1.png](img/fly_coordinate_system.png)
