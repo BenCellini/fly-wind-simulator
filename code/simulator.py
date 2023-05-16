@@ -81,14 +81,6 @@ class FlyWindDynamics:
         self.r_perp = np.array(0.0)  # perpendicular thrust if open-loop or reference speed if closed-loop
         self.r_phi = np.array(0.0)  # rotational torque if open-loop or reference rotational speed if closed-loop
 
-        # Initialize the control commands for simulation over time
-        self.t_sim = None  # time vector
-        self.r_para_sim = None  # parallel thrust if open-loop or reference speed if closed-loop
-        self.r_perp_sim = None  # perpendicular thrust if open-loop or reference speed if closed-loop
-        self.r_phi_sim = None  # rotational torque if open-loop or reference rotational speed if closed-loop
-        self.wdot_sim = None  # derivative of wind speed
-        self.zetadot_sim = None  # derivative of wind angle in global frame
-
         # Initialize variables to store simulation data
         self.t_solve = []
         self.x_solve = []
@@ -133,36 +125,6 @@ class FlyWindDynamics:
         # Set wind
         self.wdot = wdot
         self.zetadot = zetadot
-
-    def set_control_commands(self, t_sim, r_para=None, r_perp=None, r_phi=None, wdot=None, zetadot=None):
-        # Time
-        self.t_sim = t_sim
-
-        # Set commands to 0 if not given
-        if r_para is None:
-            self.r_para_sim = np.zeros_like(self.t_sim)
-        else:
-            self.r_para_sim = r_para.copy()
-
-        if r_perp is None:
-            self.r_perp_sim = np.zeros_like(self.t_sim)
-        else:
-            self.r_perp_sim = r_perp.copy()
-
-        if r_phi is None:
-            self.r_phi_sim = np.zeros_like(self.t_sim)
-        else:
-            self.r_phi_sim = r_phi.copy()
-
-        if wdot is None:
-            self.wdot_sim = np.zeros_like(self.t_sim)
-        else:
-            self.wdot_sim = wdot.copy()
-
-        if zetadot is None:
-            self.zetadot_sim = np.zeros_like(self.t_sim)
-        else:
-            self.zetadot_sim = zetadot.copy()
 
     def calculate_air_velocity(self, states, flag2D=False, w_direct=None):
         # Get states
@@ -347,7 +309,7 @@ class FlyWindDynamics:
 
         # Calculate air velocity
         a_para, a_perp, a, gamma = self.calculate_air_velocity(self.x, flag2D=True)
-        dir_of_travel =  phi + psi
+        dir_of_travel = phi + psi
 
         # Ground velocity in global frame
         xvel = v_para * np.cos(phi) - v_perp * np.sin(phi)
