@@ -58,6 +58,12 @@ class FlyWindDynamics:
         #   'align_phi': PD controller to control heading
         self.control_mode = control_mode
 
+        # Initialize control gains
+        self.Kp_para = 10.0  # proportional control constant for parallel speed
+        self.Kp_perp = 0.0  # proportional control constant for perpendicular speed
+        self.Kp_phi = 80.0  # proportional control constant for rotational speed
+        self.Kd_phi = 3.0  # derivative control constant for rotational speed
+
         # Initialize the open-loop inputs
         self.t = 0.0  # current time
         self.u_para = np.array(0.0)  # parallel thrust
@@ -186,17 +192,11 @@ class FlyWindDynamics:
 
         return v_para, v_perp, g, psi
 
-    def calculate_dir_of_travel(self, states, flag2D=False):
-        # Get states
-        v_para, v_perp, phi, phidot, w, zeta = self.unpack_states(states, flag2D=flag2D)
-
-        # Ground velocity angle
-        v_para, v_perp, g, psi = self.calculate_ground_velocity(states, flag2D=flag2D)
-
-        # Get heading velocity, air velocity, & direction-of-travel angles
-        dir_of_travel = psi + phi  # direction of travel in global frame
-
-        return dir_of_travel
+    def set_controller_gains(self, Kp_para=10.0, Kp_perp=0.0, Kp_phi=80.0, Kd_phi=3.0):
+        self.Kp_para = Kp_para  # proportional control constant for parallel speed
+        self.Kp_perp = Kp_perp  # proportional control constant for perpendicular speed
+        self.Kp_phi = Kp_phi  # proportional control constant for rotational speed
+        self.Kd_phi = Kd_phi  # derivative control constant for rotational speed
 
     def calculate_control_inputs(self, r_para, r_perp, r_phi, states, flag2D=False):
         # Get states
@@ -208,10 +208,13 @@ class FlyWindDynamics:
             u_perp = np.array(r_perp).copy()
             u_phi = np.array(r_phi).copy()
 
-        elif self.control_mode == 'align_phi':
-            u_para = np.array(r_para).copy()
-            u_perp = np.array(r_perp).copy()
-            u_phi = np.array(r_phi).copy()
+        elif self.control_mode == 'align_psi':
+            v_para, v_perp, g, psi = self.calculate_ground_velocity(states, flag2D=flag2D)
+            dir_of_travel = phi + psi
+
+            u_para = self.Kp_para * (r_para - v_para)
+            u_perp = self.Kp_perp * (r_perp - v_perp)
+            u_phi = self.Kp_phi * (r_phi - dir_of_travel) - self.Kd_phi * phidot
 
         elif self.control_mode == 'hover':  # set thrust to cancel out wind, can add control afterwards
             a_para, a_perp, a, gamma = self.calculate_air_velocity(states, flag2D=flag2D)
@@ -227,7 +230,7 @@ class FlyWindDynamics:
 
         else:
             raise Exception("'control_mode' must be set to "
-                            "'open_loop', 'align_phi', 'hover', 'no_dynamics', or 'no_dynamics_control'")
+                            "'open_loop', 'align_psi', 'hover', 'no_dynamics', or 'no_dynamics_control'")
 
         return u_para, u_perp, u_phi  # return the open-loop control inputs
 
@@ -344,6 +347,7 @@ class FlyWindDynamics:
 
         # Calculate air velocity
         a_para, a_perp, a, gamma = self.calculate_air_velocity(self.x, flag2D=True)
+        dir_of_travel =  phi + psi
 
         # Ground velocity in global frame
         xvel = v_para * np.cos(phi) - v_perp * np.sin(phi)
@@ -390,6 +394,7 @@ class FlyWindDynamics:
                 'a_perp': a_perp,
                 'a': a,
                 'gamma': gamma,
+                'dir_of_travel': dir_of_travel,
 
                 'xvel': xvel,
                 'yvel': yvel,
@@ -458,155 +463,6 @@ class FlyWindDynamics:
         self.yvel = yvel
         self.t_solve = []
         self.x_solve = []
-
-    def simulate(self, x0, tsim, usim):
-        """ Simulate dynamics.
-
-        Inputs
-            x0: initial state vector
-            tsim: time vector
-            usim: inputs as columns
-                1st - parallel thrust (thrust magnitude if in polar mode)
-                2nd - perpendicular thrust (thrust direction if in polar mode)
-                3rd - rotational torque
-                4th - derivative of wind speed
-                5th - derivative of wind angle in global frame
-
-        Outputs
-            sim_data: dictionary containing simulation data
-        """
-
-        # Sampling time
-        self.dt = np.mean(np.diff(tsim))
-
-        if self.polar_mode:
-            # Replace state & input names
-            self.state_names[0] = 'g'
-            self.state_names[1] = 'psi'
-
-            self.input_names[0] = 'u_g'
-            self.input_names[1] = 'u_psi'
-
-            # Transform polar initial condition to cartesian
-            g0 = x0[0]  # ground speed
-            psi0 = x0[1]  # ground speed angle
-            v_para_0 = g0 * np.cos(psi0)  # parallel ground speed
-            v_perp_0 = g0 * np.sin(psi0)  # perpendicular ground speed
-
-            # Replace initial conditions with model states
-            x0[0] = v_para_0
-            x0[1] = v_perp_0
-
-            # Transform & replace control inputs
-            r_g = usim[:, 0].copy()  # forward thrust magnitude
-            r_psi = usim[:, 1].copy()  # forward thrust angle
-            r_para = r_g * np.cos(r_psi)  # parallel thrust
-            r_perp = r_g * np.sin(r_psi)  # perpendicular thrust
-
-            usim = usim.copy()
-            usim[:, 0] = r_para
-            usim[:, 1] = r_perp
-
-        # Set the control commands
-        self.set_control_commands(tsim,
-                                  r_para=usim[:, 0],
-                                  r_perp=usim[:, 1],
-                                  r_phi=usim[:, 2],
-                                  wdot=usim[:, 3],
-                                  zetadot=usim[:, 4])
-
-        # Simulate the system & calculate the states over time
-        # x = integrate.odeint(self.system_ode, x0, tsim, tcrit=tsim, tfirst=True)
-        x = self.odeint_simulate(x0, tsim, usim)[0]
-
-        # Store state vectors
-        self.x = x
-
-        # Get the states
-        v_para, v_perp, phi, phidot, w, zeta = self.unpack_states(x, flag2D=True)
-
-        # Ground velocity
-        v_para, v_perp, g, psi = self.calculate_ground_velocity(x, flag2D=True)
-
-        # Air velocity
-        a_para, a_perp, a, gamma = self.calculate_air_velocity(x, flag2D=True)
-
-        # Relative angle between air velocity & wind velocity
-        beta = phi - zeta
-
-        # Direction of travel
-        dir_of_travel = self.calculate_dir_of_travel(x, flag2D=True)
-
-        # Ground velocity in global frame
-        xvel = v_para * np.cos(phi) - v_perp * np.sin(phi)
-        yvel = v_para * np.sin(phi) + v_perp * np.cos(phi)
-
-        # Position
-        xpos = integrate.cumtrapz(xvel, tsim, initial=0)
-        ypos = integrate.cumtrapz(yvel, tsim, initial=0)
-
-        # Control inputs from control commands
-        u_para, u_perp, u_phi = self.calculate_control_inputs(self.r_para_sim, self.r_perp_sim, self.r_phi_sim, x,
-                                                              flag2D=True)
-        self.u = np.stack((u_para, u_perp, u_phi, self.wdot_sim, self.zetadot_sim), axis=1)
-
-        # Thrust magnitude & direction
-        u_g = np.linalg.norm((u_para, u_perp), ord=2, axis=0)  # thrust magnitude
-        u_psi = np.arctan2(u_perp, u_para)  # thrust angle
-
-        # Drag
-        D_para = self.C_para * a_para
-        D_perp = self.C_perp * a_perp
-        D_phi = self.C_phi * phidot
-
-        # Acceleration
-        v_para_dot = ((u_para - D_para) / self.m) + (v_perp * phidot)  # parallel acceleration
-        v_perp_dot = ((u_perp - D_perp) / self.m) - (v_para * phidot)  # perpendicular acceleration
-        q = np.linalg.norm((v_para_dot, v_perp_dot), ord=2, axis=0)  # acceleration magnitude
-        alpha = (np.arctan2(v_perp_dot, v_para_dot))  # acceleration angle
-
-        # Angular acceleration
-        phiddot = (u_phi / self.I) - (D_phi / self.I)
-
-        # Output dictionary
-        sim_data = {'time': tsim,
-                    'x': x,
-                    'v_para': v_para,
-                    'v_perp': v_perp,
-                    'phi': phi,
-                    'phidot': phidot,
-                    'w': w,
-                    'zeta': zeta,
-                    'xvel': xvel,
-                    'yvel': yvel,
-                    'xpos': xpos,
-                    'ypos': ypos,
-                    'g': g,
-                    'psi': psi,
-                    'a': a,
-                    'gamma': gamma,
-                    'a_para': a_para,
-                    'a_perp': a_perp,
-                    'q': q,
-                    'alpha': alpha,
-                    'beta': beta,
-                    'dir_of_travel': dir_of_travel,
-                    'r_para': self.r_para_sim,
-                    'r_perp': self.r_perp_sim,
-                    'r_phi': self.r_phi_sim,
-                    'u_para': u_para,
-                    'u_perp': u_perp,
-                    'u_phi': u_phi,
-                    'u_g': u_g,
-                    'u_psi': u_psi,
-                    'v_para_dot': v_para_dot,
-                    'v_perp_dot': v_perp_dot,
-                    'phiddot': phiddot,
-                    'wdot': self.wdot_sim,
-                    'zetadot': self.zetadot_sim,
-                    }
-
-        return sim_data
 
 
 def polar2cart(r, theta):
