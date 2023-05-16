@@ -6,7 +6,7 @@ import fly_plot_lib_plot as fpl
 
 
 def plot_trajectory(xpos,  ypos, phi, color, ax=None, size_radius=None, nskip=0,
-                    colormap='bone_r', colornorm=None, edgecolor='none'):
+                    colormap='bone_r', colornorm=None, edgecolor='none', alpha=1.0):
     if color is None:
         color = phi
 
@@ -41,7 +41,7 @@ def plot_trajectory(xpos,  ypos, phi, color, ax=None, size_radius=None, nskip=0,
                                colornorm=colornorm,
                                show_centers=False,
                                size_angle=20,
-                               alpha=1,
+                               alpha=alpha,
                                edgecolor=edgecolor)
 
     ax.set_aspect('equal')

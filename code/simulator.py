@@ -1,13 +1,17 @@
 import numpy as np
 from scipy import integrate
 import scipy
+from utils import list_of_dicts_to_dict_of_lists
 
 
 class FlyWindDynamics:
-    def __init__(self, polar_mode=False, control_mode='open_loop',
+    def __init__(self, polar_mode=False, control_mode='open_loop', update_every_step=True,
                  m=0.1, I=0.1, C_para=1.0, C_perp=1.0, C_phi=1.0):
 
         """ Initialize the fly-wind-dynamics simulator """
+
+        # Set ODE solver parameter
+        self.update_every_step = update_every_step
 
         # Set state names
         #   v_para: parallel speed in fly frame
@@ -54,42 +58,40 @@ class FlyWindDynamics:
         #   'align_phi': PD controller to control heading
         self.control_mode = control_mode
 
-        # Initialize the open-loop control inputs
-        self.u_para = None  # parallel thrust
-        self.u_perp = None  # perpendicular thrust
-        self.u_phi = None  # rotational torque
-
-        # Initialize the control commands (closed-loop reference values or open-loop)
-        self.tsim = None  # time vector
-        self.r_para = None  # parallel thrust if open-loop or reference speed if closed-loop
-        self.r_perp = None  # perpendicular thrust if open-loop or reference speed if closed-loop
-        self.r_phi = None  # rotational torque if open-loop or reference rotational speed if closed-loop
-        self.wdot = None  # derivative of wind speed
-        self.zetadot = None  # derivative of wind angle in global frame
-
-        # Initialize interpolaters for controls
-        self.interpolate = {}  # dictionary of interpolaters for each control command
-
-        # Define the control commands for step ODE solver
-        self.r_para_step = 0.0
-        self.r_perp_step = 0.0
-        self.r_phi_step = 0.0
-        self.wdot_step = 0.0
-        self.zetadot_step = 0.0
-
-        # Initialize variables to store simulation data
-        self.dt = 0.0  # sample time
+        # Initialize the open-loop inputs
         self.t = 0.0  # current time
+        self.u_para = np.array(0.0)  # parallel thrust
+        self.u_perp = np.array(0.0)  # perpendicular thrust
+        self.u_phi = np.array(0.0)  # rotational torque
+        self.wdot = np.array(0.0)  # derivative of wind speed
+        self.zetadot = np.array(0.0)  # derivative of wind angle in global frame
+
+        # Current states & controls
         self.x = None  # state data
         self.u = None  # input data
+
+        # Initialize the control commands (closed-loop reference values or open-loop)
+        self.r_para = np.array(0.0)  # parallel thrust if open-loop or reference speed if closed-loop
+        self.r_perp = np.array(0.0)  # perpendicular thrust if open-loop or reference speed if closed-loop
+        self.r_phi = np.array(0.0)  # rotational torque if open-loop or reference rotational speed if closed-loop
+
+        # Initialize the control commands for simulation over time
+        self.t_sim = None  # time vector
+        self.r_para_sim = None  # parallel thrust if open-loop or reference speed if closed-loop
+        self.r_perp_sim = None  # perpendicular thrust if open-loop or reference speed if closed-loop
+        self.r_phi_sim = None  # rotational torque if open-loop or reference rotational speed if closed-loop
+        self.wdot_sim = None  # derivative of wind speed
+        self.zetadot_sim = None  # derivative of wind angle in global frame
+
+        # Initialize variables to store simulation data
+        self.t_solve = []
+        self.x_solve = []
+        self.dt = 0.0  # sample time
         self.xvel = 0.0  # x velocity in global frame
         self.yvel = 0.0  # y velocity in global frame
         self.xpos = 0.0  # x position in global frame
         self.ypos = 0.0  # x position in global frame
         self.sim_data = {}  # all simulation data in dictionary
-
-        # Initialize ODE solver
-        self.solver = integrate.ode(self.system_ode).set_integrator('vode', method='bdf')
 
     def unpack_states(self, x, flag2D=False):
         if not flag2D:
@@ -105,36 +107,56 @@ class FlyWindDynamics:
 
         return v_para, v_perp, phi, phidot, w, zeta
 
-    def set_control_commands(self, tsim, r_para=None, r_perp=None, r_phi=None, wdot=None, zetadot=None):
+    def update_inputs(self, x=None, t=None, r_para=0.0, r_perp=0.0, r_phi=0.0, wdot=0.0, zetadot=0.0):
+        # Set state
+        if x is None:
+            x = self.x
+
+        # Set time
+        if t is not None:
+            self.t = t
+
+        # Set commands
+        self.r_para = np.array(r_para)
+        self.r_perp = np.array(r_perp)
+        self.r_phi = np.array(r_phi)
+
+        # Calculate control inputs
+        self.u_para, self.u_perp, self.u_phi = self.calculate_control_inputs(r_para, r_perp, r_phi, x)
+
+        # Set wind
+        self.wdot = wdot
+        self.zetadot = zetadot
+
+    def set_control_commands(self, t_sim, r_para=None, r_perp=None, r_phi=None, wdot=None, zetadot=None):
         # Time
-        self.tsim = tsim
-        n_point = self.tsim.shape[0]
+        self.t_sim = t_sim
 
         # Set commands to 0 if not given
         if r_para is None:
-            self.r_para = np.zeros((n_point, 1))
+            self.r_para_sim = np.zeros_like(self.t_sim)
         else:
-            self.r_para = r_para.copy()
+            self.r_para_sim = r_para.copy()
 
         if r_perp is None:
-            self.r_perp = np.zeros((n_point, 1))
+            self.r_perp_sim = np.zeros_like(self.t_sim)
         else:
-            self.r_perp = r_perp.copy()
+            self.r_perp_sim = r_perp.copy()
 
         if r_phi is None:
-            self.r_phi = np.zeros((n_point, 1))
+            self.r_phi_sim = np.zeros_like(self.t_sim)
         else:
-            self.r_phi = r_phi.copy()
+            self.r_phi_sim = r_phi.copy()
 
         if wdot is None:
-            self.wdot = np.zeros((n_point, 1))
+            self.wdot_sim = np.zeros_like(self.t_sim)
         else:
-            self.wdot = wdot.copy()
+            self.wdot_sim = wdot.copy()
 
         if zetadot is None:
-            self.zetadot = np.zeros((n_point, 1))
+            self.zetadot_sim = np.zeros_like(self.t_sim)
         else:
-            self.zetadot = zetadot.copy()
+            self.zetadot_sim = zetadot.copy()
 
     def calculate_air_velocity(self, states, flag2D=False, w_direct=None):
         # Get states
@@ -182,14 +204,14 @@ class FlyWindDynamics:
 
         # Calculate control input forces/torques based on control mode & control commands
         if self.control_mode == 'open_loop':
-            u_para = r_para.copy()
-            u_perp = r_perp.copy()
-            u_phi = r_phi.copy()
+            u_para = np.array(r_para).copy()
+            u_perp = np.array(r_perp).copy()
+            u_phi = np.array(r_phi).copy()
 
         elif self.control_mode == 'align_phi':
-            u_para = r_para.copy()
-            u_perp = r_perp.copy()
-            u_phi = r_phi.copy()
+            u_para = np.array(r_para).copy()
+            u_perp = np.array(r_perp).copy()
+            u_phi = np.array(r_phi).copy()
 
         elif self.control_mode == 'hover':  # set thrust to cancel out wind, can add control afterwards
             a_para, a_perp, a, gamma = self.calculate_air_velocity(states, flag2D=flag2D)
@@ -204,11 +226,12 @@ class FlyWindDynamics:
             u_phi = (self.C_phi * phidot) + (r_phi * self.I)
 
         else:
-            raise Exception("'control_mode' must be set to 'open_loop', 'hover', or 'no_dynamics'")
+            raise Exception("'control_mode' must be set to "
+                            "'open_loop', 'align_phi', 'hover', 'no_dynamics', or 'no_dynamics_control'")
 
         return u_para, u_perp, u_phi  # return the open-loop control inputs
 
-    def system_ode(self, t, x, mode):
+    def system_ode(self, t, x):
         """ Dynamical system model.
 
         Inputs
@@ -228,26 +251,8 @@ class FlyWindDynamics:
         # Get states
         v_para, v_perp, phi, phidot, w, zeta = x
 
-        # Get current control commands
-        if mode == 'step':  # step mode
-            r_para = np.array(self.r_para_step)
-            r_perp = np.array(self.r_perp_step)
-            r_phi = np.array(self.r_phi_step)
-            wdot = np.array(self.wdot_step)
-            zetadot = np.array(self.zetadot_step)
-
-        elif mode == 'series':  # for preset time series
-            r_para = self.interpolate['r_para'](t)
-            r_perp = self.interpolate['r_perp'](t)
-            r_phi = self.interpolate['r_phi'](t)
-            wdot = self.interpolate['wdot'](t)
-            zetadot = self.interpolate['zetadot'](t)
-
-        else:
-            raise Exception('ODE mode must be "step" or "series"')
-
-        # Calculate control inputs
-        u_para, u_perp, u_phi = self.calculate_control_inputs(r_para, r_perp, r_phi, x)
+        self.t_solve.append(t)
+        self.x_solve.append(x)
 
         # Calculate air velocity
         a_para, a_perp, a, gamma = self.calculate_air_velocity(x)
@@ -257,65 +262,88 @@ class FlyWindDynamics:
         D_perp = self.C_perp * a_perp
         D_phi = self.C_phi * phidot
 
+        # Update controls every time ODE solver is called
+        if self.update_every_step:
+            self.u_para, self.u_perp, self.u_phi \
+                = self.calculate_control_inputs(self.r_para, self.r_perp, self.r_phi, x)
+
+        # print(self.u_para)
+
         # Derivative of states
-        xdot = np.array([((u_para - D_para) / self.m) + (v_perp * phidot),  # v_para_dot
-                         ((u_perp - D_perp) / self.m) - (v_para * phidot),  # v_perp_dot
+        xdot = np.array([((self.u_para - D_para) / self.m) + (v_perp * phidot),  # v_para_dot
+                         ((self.u_perp - D_perp) / self.m) - (v_para * phidot),  # v_perp_dot
                          phidot,  # phidot
-                         (u_phi / self.I) - (D_phi / self.I),  # phiddot
-                         wdot,  # wdot
-                         zetadot  # zetadot
+                         (self.u_phi / self.I) - (D_phi / self.I),  # phiddot
+                         self.wdot,  # wdot
+                         self.zetadot  # zetadot
                          ])
 
         return xdot
 
-    def odeint_step(self, x0, dt=None, polar=None,
-                    r_g=0.0, r_psi=0.0, r_para=0.0, r_perp=0.0, r_phi=0.0, wdot=0.0, zetadot=0.0):
-
-        x0 = x0.copy()
-
-        if dt is None:
-            dt = self.dt
+    def odeint_step(self, x0=None, dt=None, usim=None, polar=None, update_every_step=None):
+        """ Solve ODE for one time step"""
 
         if polar is None:
             polar = self.polar_mode
 
+        if update_every_step is not None:
+            self.update_every_step = update_every_step
+
+        if x0 is None:
+            x0 = self.x.copy()
+        else:
+            x0 = x0.copy()
+
+        if dt is None:
+            dt = self.dt
+
+        # Get inputs
+        if usim is None:
+            usim = np.zeros(self.n_input)
+
+        usim = usim.copy()
+
+        # Convert initial conditions & inputs to polar
         if polar:
-            # First two states are polar
+            # First two states & inputs are polar
             g0 = x0[0]
             psi0 = x0[1]
 
-            # Convert polar states & controls to cartesian
-            v_para_0, v_perp_0, r_para, r_perp = self.convert_to_cartesian(g0, psi0, r_g, r_psi)
+            r_g = usim[0]
+            r_psi = usim[1]
 
-            # Replace initial polar states
+            # Convert polar states & controls to cartesian
+            v_para_0, v_perp_0 = polar2cart(g0, psi0)
+
+            r_para, r_perp = polar2cart(r_g, r_psi)
+
+            # Replace initial polar states & inputs
             x0[0] = v_para_0
             x0[1] = v_perp_0
 
-        # Set controls
-        self.r_para_step = r_para
-        self.r_perp_step = r_perp
-        self.r_phi_step = r_phi
-        self.wdot_step = wdot
-        self.zetadot_step = zetadot
+            usim[0] = r_para
+            usim[1] = r_perp
+
+        # Update control inputs & wind
+        self.update_inputs(x0, r_para=usim[0], r_perp=usim[1], r_phi=usim[2], wdot=usim[3], zetadot=usim[4])
 
         # Integrate for one time step
         t_span = np.array([0, dt])
-        x_solve = integrate.odeint(self.system_ode, x0, t_span,
-                                   tcrit=t_span, tfirst=True, args=('step',))
+        x_solve = integrate.odeint(self.system_ode, x0, t_span, tcrit=t_span, tfirst=True)
+
+        # print('t = ', np.round(self.t + dt, 5), ':', self.u_para, ':', len(self.t_solve))
 
         # Just get solution at t=dt
-        x_step = x_solve[1]
-
-        # print(r_phi, ':', x_step)
+        self.x = x_solve[1]
 
         # Get states
-        v_para, v_perp, phi, phidot, w, zeta = self.unpack_states(x_step, flag2D=True)
+        v_para, v_perp, phi, phidot, w, zeta = self.unpack_states(self.x, flag2D=True)
 
         # Calculate ground velocity
-        v_para, v_perp, g, psi = self.calculate_ground_velocity(x_step, flag2D=True)
+        v_para, v_perp, g, psi = self.calculate_ground_velocity(self.x, flag2D=True)
 
         # Calculate air velocity
-        a_para, a_perp, a, gamma = self.calculate_air_velocity(x_step, flag2D=True)
+        a_para, a_perp, a, gamma = self.calculate_air_velocity(self.x, flag2D=True)
 
         # Ground velocity in global frame
         xvel = v_para * np.cos(phi) - v_perp * np.sin(phi)
@@ -336,60 +364,91 @@ class FlyWindDynamics:
         self.xvel = xvel.copy()
         self.yvel = yvel.copy()
 
+        # Controls in polar coordinates
+        u_g, u_psi = cart2polar(self.u_para, self.u_perp)
+
         # Update current time
-        self.t = self.t + dt
+        self.t = np.round(self.t + dt, 8)
 
         # Collect data
         data = {'time': self.t,
+
                 'v_para': v_para,
                 'v_perp': v_perp,
-                'phi': phi,
-                'phidot': phidot,
-                'w': w,
-                'zeta': zeta,
                 'g': g,
                 'psi': psi,
+
+                'phi': phi,
+                'phidot': phidot,
+
+                'w': w,
+                'zeta': zeta,
+                'wdot': self.wdot,
+                'zetadot': self.zetadot,
+
+                'a_para': a_para,
+                'a_perp': a_perp,
                 'a': a,
                 'gamma': gamma,
+
                 'xvel': xvel,
                 'yvel': yvel,
+
                 'xpos': self.xpos,
-                'ypos': self.ypos}
+                'ypos': self.ypos,
 
-        return x_step, data
+                'u_para': self.u_para,
+                'u_perp': self.u_perp,
+                'u_phi': self.u_phi,
+                'u_g': u_g,
+                'u_psi': u_psi}
 
-    def odeint_simulate(self, x0, tsim, usim):
-        # Set the control commands
-        self.set_control_commands(tsim,
-                                  r_para=usim[:, 0],
-                                  r_perp=usim[:, 1],
-                                  r_phi=usim[:, 2],
-                                  wdot=usim[:, 3],
-                                  zetadot=usim[:, 4])
+        # Output the state in polar coordinates if polar_mode is true
+        self.x = self.x.copy()
+        if polar:
+            v_para = self.x[0]
+            v_perp = self.x[1]
+            g, psi = cart2polar(v_para, v_perp)
+            self.x[0] = g
+            self.x[1] = psi
+
+        return self.x.copy(), data
+
+    def odeint_simulate(self, x0, tsim, usim, polar=None, update_every_step=None):
+        # Update ODE solver parameter
+        if update_every_step is not None:
+            self.update_every_step = update_every_step
+
+        if polar is None:
+            polar = self.polar_mode
+
+        # Reset simulator
+        self.reset()
 
         # Time step
         dt = np.mean(np.diff(tsim))
 
-        # Solve ODE
+        # Run once at time 0 to get initial data
+        x, data = self.odeint_step(x0=x0, dt=0.0, polar=polar)
+
+        # Solve ODE in steps
         t_solve = [0]
-        x_solve = [x0]
-        self.reset()
-        for n in range(1, tsim.shape[0]):
-            # print(self.r_phi[n], ':', x_solve[-1])
-            x_step, data = self.odeint_step(x_solve[-1], dt=dt, polar=False,
-                                            r_para=self.r_para[n],
-                                            r_perp=self.r_perp[n],
-                                            r_phi=self.r_phi[n],
-                                            wdot=self.wdot[n],
-                                            zetadot=self.zetadot[n])
+        x_solve = [x]
+        sim_data = [data]
+        for n in range(1, tsim.shape[0]):  # for each data point in input time vector
+            # Step
+            x, data = self.odeint_step(x0=x, dt=dt, usim=usim[n, :], polar=polar)
 
-            t_solve.append(t_solve[-1] + dt)
-            x_solve.append(x_step)
+            t_solve.append(self.t)
+            x_solve.append(x)
+            sim_data.append(data)
 
-        # Concatenate state vectors
+        # Concatenate state vectors & data
+        t_solve = np.hstack(t_solve)
         x_solve = np.vstack(x_solve)
+        sim_data = list_of_dicts_to_dict_of_lists(sim_data, make_array=True)
 
-        return x_solve, t_solve
+        return x_solve, sim_data, t_solve
 
     def reset(self, time=0.0, xpos=0.0, ypos=0.0, xvel=0.0, yvel=0.0):
         self.t = time
@@ -397,17 +456,8 @@ class FlyWindDynamics:
         self.ypos = ypos
         self.xvel = xvel
         self.yvel = yvel
-
-    def convert_to_cartesian(self, g0, psi0, r_g, r_psi):
-        # Transform polar initial condition to cartesian
-        v_para_0 = g0 * np.cos(psi0)  # parallel ground speed
-        v_perp_0 = g0 * np.sin(psi0)  # perpendicular ground speed
-
-        # Transform & replace control inputs
-        r_para = r_g * np.cos(r_psi)  # parallel thrust
-        r_perp = r_g * np.sin(r_psi)  # perpendicular thrust
-
-        return v_para_0, v_perp_0, r_para, r_perp
+        self.t_solve = []
+        self.x_solve = []
 
     def simulate(self, x0, tsim, usim):
         """ Simulate dynamics.
@@ -465,24 +515,9 @@ class FlyWindDynamics:
                                   wdot=usim[:, 3],
                                   zetadot=usim[:, 4])
 
-        # Define interpolaters for each control input
-        interp_method = 'nearest'
-        bounds_error = False
-        self.interpolate['r_para'] = scipy.interpolate.interp1d(self.tsim, self.r_para, kind=interp_method,
-                                                                fill_value=self.r_para[-1], bounds_error=bounds_error)
-        self.interpolate['r_perp'] = scipy.interpolate.interp1d(self.tsim, self.r_perp, kind=interp_method,
-                                                                fill_value=self.r_perp[-1], bounds_error=bounds_error)
-        self.interpolate['r_phi'] = scipy.interpolate.interp1d(self.tsim, self.r_phi, kind=interp_method,
-                                                               fill_value=self.r_phi[-1], bounds_error=bounds_error)
-        self.interpolate['wdot'] = scipy.interpolate.interp1d(self.tsim, self.wdot, kind=interp_method,
-                                                              fill_value=self.wdot[-1], bounds_error=bounds_error)
-        self.interpolate['zetadot'] = scipy.interpolate.interp1d(self.tsim, self.zetadot, kind=interp_method,
-                                                                 fill_value=self.r_para[-1], bounds_error=bounds_error)
-
         # Simulate the system & calculate the states over time
-        # x = integrate.odeint(self.system_ode, x0, tsim, tcrit=tsim, tfirst=True, args=('series',))
-        # # x, t_solve = self.ode_simulate(x0, tsim, usim)
-        x, t_solve = self.odeint_simulate(x0, tsim, usim)
+        # x = integrate.odeint(self.system_ode, x0, tsim, tcrit=tsim, tfirst=True)
+        x = self.odeint_simulate(x0, tsim, usim)[0]
 
         # Store state vectors
         self.x = x
@@ -511,8 +546,9 @@ class FlyWindDynamics:
         ypos = integrate.cumtrapz(yvel, tsim, initial=0)
 
         # Control inputs from control commands
-        u_para, u_perp, u_phi = self.calculate_control_inputs(self.r_para, self.r_perp, self.r_phi, x, flag2D=True)
-        self.u = np.stack((u_para, u_perp, u_phi, self.wdot, self.zetadot), axis=1)
+        u_para, u_perp, u_phi = self.calculate_control_inputs(self.r_para_sim, self.r_perp_sim, self.r_phi_sim, x,
+                                                              flag2D=True)
+        self.u = np.stack((u_para, u_perp, u_phi, self.wdot_sim, self.zetadot_sim), axis=1)
 
         # Thrust magnitude & direction
         u_g = np.linalg.norm((u_para, u_perp), ord=2, axis=0)  # thrust magnitude
@@ -555,9 +591,9 @@ class FlyWindDynamics:
                     'alpha': alpha,
                     'beta': beta,
                     'dir_of_travel': dir_of_travel,
-                    'r_para': self.r_para,
-                    'r_perp': self.r_perp,
-                    'r_phi': self.r_phi,
+                    'r_para': self.r_para_sim,
+                    'r_perp': self.r_perp_sim,
+                    'r_phi': self.r_phi_sim,
                     'u_para': u_para,
                     'u_perp': u_perp,
                     'u_phi': u_phi,
@@ -566,8 +602,24 @@ class FlyWindDynamics:
                     'v_para_dot': v_para_dot,
                     'v_perp_dot': v_perp_dot,
                     'phiddot': phiddot,
-                    'wdot': self.wdot,
-                    'zetadot': self.zetadot,
+                    'wdot': self.wdot_sim,
+                    'zetadot': self.zetadot_sim,
                     }
 
         return sim_data
+
+
+def polar2cart(r, theta):
+    # Transform polar to cartesian
+    x = r * np.cos(theta)
+    y = r * np.sin(theta)
+
+    return x, y
+
+
+def cart2polar(x, y):
+    # Transform cartesian to polar
+    r = np.sqrt((x**2) + (y**2))
+    theta = np.arctan2(y, x)
+
+    return r, theta
