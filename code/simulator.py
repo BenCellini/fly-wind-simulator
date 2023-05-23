@@ -164,6 +164,11 @@ class FlyWindDynamics:
         # Get states
         v_para, v_perp, phi, phidot, w, zeta = self.unpack_states(states, flag2D=flag2D)
 
+        # Calculate ground velocity & air velocity
+        v_para, v_perp, g, psi = self.calculate_ground_velocity(states, flag2D=flag2D)
+        a_para, a_perp, a, gamma = self.calculate_air_velocity(states, flag2D=flag2D)
+        dir_of_travel = phi + psi
+
         # Calculate control input forces/torques based on control mode & control commands
         if self.control_mode == 'open_loop':
             u_para = np.array(r_para).copy()
@@ -171,15 +176,36 @@ class FlyWindDynamics:
             u_phi = np.array(r_phi).copy()
 
         elif self.control_mode == 'align_psi':
-            v_para, v_perp, g, psi = self.calculate_ground_velocity(states, flag2D=flag2D)
-            dir_of_travel = phi + psi
-
             u_para = self.Kp_para * (r_para - v_para)
             u_perp = self.Kp_perp * (r_perp - v_perp)
             u_phi = self.Kp_phi * (r_phi - dir_of_travel) - self.Kd_phi * phidot
 
+        elif self.control_mode == 'align_psi_constant_v_para':
+            u_para = (self.C_para * a_para) - (self.m * v_perp * phidot) + (self.m * r_para)
+            u_perp = 0.0
+            u_phi = self.Kp_phi * (r_phi - dir_of_travel) - self.Kd_phi * phidot
+
+        elif self.control_mode == 'align_psi_constant_g':
+            u_para = (self.C_para * a_para) - (self.m * v_perp * phidot) + (self.m * r_para)
+            u_perp = (self.C_perp * a_perp) + (self.m * v_para * phidot) + (self.m * r_perp)
+            u_phi = self.Kp_phi * (r_phi - dir_of_travel) - self.Kd_phi * phidot
+
+        elif self.control_mode == 'align_phidot':
+            u_para = self.Kp_para * (r_para - v_para)
+            u_perp = self.Kp_perp * (r_perp - v_perp)
+            u_phi = self.Kp_phi * (r_phi - phidot)
+
+        elif self.control_mode == 'align_phidot_constant_v_para':
+            u_para = (self.C_para * a_para) - (self.m * v_perp * phidot) + (self.m * r_para)
+            u_perp = 0.0
+            u_phi = self.Kp_phi * (r_phi - phidot)
+
+        elif self.control_mode == 'align_phidot_constant_g':
+            u_para = (self.C_para * a_para) - (self.m * v_perp * phidot) + (self.m * r_para)
+            u_perp = (self.C_perp * a_perp) + (self.m * v_para * phidot) + (self.m * r_perp)
+            u_phi = self.Kp_phi * (r_phi - phidot)
+
         elif self.control_mode == 'hover':  # set thrust to cancel out wind, can add control afterwards
-            a_para, a_perp, a, gamma = self.calculate_air_velocity(states, flag2D=flag2D)
             u_para = (self.C_para * a_para) - (self.m * v_perp * phidot)
             u_perp = (self.C_perp * a_perp) + (self.m * v_para * phidot)
             u_phi = (self.C_phi * phidot)
@@ -190,9 +216,14 @@ class FlyWindDynamics:
             u_perp = (self.C_perp * a_perp) + (self.m * v_para * phidot) + (self.m * r_perp)
             u_phi = (self.C_phi * phidot) + (r_phi * self.I)
 
+        elif self.control_mode == 'test':  # set thrust to cancel out wind, can add control afterwards
+            u_para = (self.C_para * a_para) - (self.m * v_perp * phidot) + (self.m * r_para)
+            # u_perp = (self.C_perp * a_perp) + (self.m * v_para * phidot) + (self.m * r_perp)
+            u_perp = 0.0
+            u_phi = self.Kp_phi * (r_phi - dir_of_travel) - self.Kd_phi * phidot
+
         else:
-            raise Exception("'control_mode' must be set to "
-                            "'open_loop', 'align_psi', 'hover', 'no_dynamics', or 'no_dynamics_control'")
+            raise Exception('control mode not available')
 
         return u_para, u_perp, u_phi  # return the open-loop control inputs
 
